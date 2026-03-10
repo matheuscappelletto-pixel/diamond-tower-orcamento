@@ -199,12 +199,22 @@ def ler_extrato_xlsx(caminho: Path):
     wb = load_workbook(caminho, data_only=True)
     ws = wb.active
 
+    print(f"   Aba lida: {ws.title}")
+    print(f"   Linhas: {ws.max_row} | Colunas: {ws.max_column}")
+    print("   Prévia das primeiras 15 linhas:")
+    for row in range(1, min(ws.max_row, 15) + 1):
+        vals = []
+        for col in range(1, min(ws.max_column, 8) + 1):
+            v = ws.cell(row, col).value
+            vals.append("" if v is None else str(v))
+        print(f"   L{row}: {vals}")
+
     header_row = None
     col_data = col_hist = col_debito = col_credito = None
 
     for row in range(1, min(ws.max_row, 30) + 1):
         valores = []
-        for col in range(1, min(ws.max_column, 15) + 1):
+        for col in range(1, min(ws.max_column, 20) + 1):
             val = ws.cell(row, col).value
             valores.append("" if val is None else str(val).strip())
 
@@ -233,6 +243,12 @@ def ler_extrato_xlsx(caminho: Path):
             col_credito = achou_credito
             break
 
+    print(f"   Header row detectado: {header_row}")
+    print(f"   Coluna Data: {col_data}")
+    print(f"   Coluna Histórico: {col_hist}")
+    print(f"   Coluna Débito: {col_debito}")
+    print(f"   Coluna Crédito: {col_credito}")
+
     if not header_row or not col_data or not col_hist or not col_debito:
         raise Exception("Não foi possível localizar cabeçalhos DATA / HISTÓRICO / DÉBITO no extrato.")
 
@@ -243,23 +259,25 @@ def ler_extrato_xlsx(caminho: Path):
         hist_val = ws.cell(row, col_hist).value
         debito_val = ws.cell(row, col_debito).value
 
+        historico = "" if hist_val is None else str(hist_val).strip()
+        debito = limpar_valor_excel(debito_val)
+
+        print(f"   Linha {row}: data={data_val} | hist={historico} | debito={debito_val} -> {debito}")
+
         if data_val is None and hist_val is None and debito_val is None:
             continue
 
-        historico = "" if hist_val is None else str(hist_val).strip()
         if not historico:
             continue
 
         hist_norm = norm(historico)
 
-        # ignora linhas-resumo / cabeçalhos repetidos
         if hist_norm in ["historico", "conta", "saldo", "credito", "debito"]:
             continue
 
         if "saldo mes anterior" in hist_norm:
             continue
 
-        debito = limpar_valor_excel(debito_val)
         if debito <= 0:
             continue
 
@@ -283,11 +301,12 @@ def ler_extrato_xlsx(caminho: Path):
             "ano": ano,
         })
 
+    print(f"   Total de lançamentos encontrados: {len(lancamentos)}")
+
     if not lancamentos:
         raise Exception("Nenhum débito encontrado no arquivo.")
 
     return lancamentos
-
 
 # ── 3. Classificação ──────────────────────────────────────────
 
