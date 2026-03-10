@@ -16,7 +16,7 @@ import re
 import json
 import time
 import smtplib
-import calendar
+import unicodedata
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from email.mime.text import MIMEText
@@ -27,139 +27,140 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
-import unicodedata
 
 
 # ── Configuração via variáveis de ambiente ────────────────────
 
-GUARIDA_URL       = "https://agenciavirtual3.guarida.com.br/financeiro/extrato-condominio"
-GUARIDA_USER      = os.environ["GUARIDA_USER"]
-GUARIDA_PASS      = os.environ["GUARIDA_PASS"]
-ANTHROPIC_KEY     = os.environ["ANTHROPIC_KEY"]
-SPREADSHEET_ID    = os.environ["SPREADSHEET_ID"]
+GUARIDA_URL = "https://agenciavirtual3.guarida.com.br/financeiro/extrato-condominio"
+
+GUARIDA_USER = os.environ["GUARIDA_USER"]
+GUARIDA_PASS = os.environ["GUARIDA_PASS"]
+ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
+SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 
-NOTIFY_EMAIL      = os.environ.get("NOTIFY_EMAIL", "matheuscappelletto@gmail.com")
-GMAIL_USER        = os.environ.get("GMAIL_USER", "")
-GMAIL_PASS        = os.environ.get("GMAIL_PASS", "")
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "matheuscappelletto@gmail.com")
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_PASS = os.environ.get("GMAIL_PASS", "")
 
-# Opcional para execução manual futura
-MANUAL_MES = os.environ.get("MANUAL_MES")
-MANUAL_ANO = os.environ.get("MANUAL_ANO")
+# Execução manual opcional
+MANUAL_MES = os.environ.get("MANUAL_MES", "").strip()
+MANUAL_ANO = os.environ.get("MANUAL_ANO", "").strip()
 
 
 # ── Mapeamento mês → coluna na planilha ───────────────────────
 
 MONTH_TO_COL = {
-    (3,  2025): "F",
-    (4,  2025): "G",
-    (5,  2025): "H",
-    (6,  2025): "I",
-    (7,  2025): "J",
-    (8,  2025): "K",
-    (9,  2025): "L",
+    (3, 2025): "F",
+    (4, 2025): "G",
+    (5, 2025): "H",
+    (6, 2025): "I",
+    (7, 2025): "J",
+    (8, 2025): "K",
+    (9, 2025): "L",
     (10, 2025): "M",
     (11, 2025): "N",
     (12, 2025): "O",
-    (1,  2026): "P",
-    (2,  2026): "Q",
-    (3,  2026): "R",
+    (1, 2026): "P",
+    (2, 2026): "Q",
+    (3, 2026): "R",
 }
 
 
 # ── Mapeamento linhas da planilha ─────────────────────────────
 
 ROW_MAP = {
-    4:  {"empresa": "ALTO PADRAO",  "desc": "Alto Padrão — Mão de Obra (Monitoramento/Ronda/Porteiro/Limpeza/Serviços Gerais)",
-         "keywords": ["alto padrao", "monitoramento", "ronda", "porteiro", "expedicao", "recepcao", "limpeza 03", "servicos gerais"]},
-    11: {"empresa": "CAPPELLETTO",  "desc": "Cappelletto — Gestores presenciais",
-         "keywords": ["cappelletto", "gestor"]},
-    12: {"empresa": "GUARIDA",      "desc": "Guarida — Auxiliar Administração",
+    4: {"empresa": "ALTO PADRAO", "desc": "Alto Padrão — Mão de Obra (Monitoramento/Ronda/Porteiro/Limpeza/Serviços Gerais)",
+        "keywords": ["alto padrao", "monitoramento", "ronda", "porteiro", "expedicao", "recepcao", "limpeza 03", "servicos gerais", "onx", "portaria", "recepcao 8h"]},
+    11: {"empresa": "CAPPELLETTO", "desc": "Cappelletto — Gestores presenciais",
+         "keywords": ["cappelletto", "gestor", "servico auxiliar de administracao condominial"]},
+    12: {"empresa": "GUARIDA", "desc": "Guarida — Auxiliar Administração",
          "keywords": ["auxiliar administracao", "guarida administracao", "taxa de administracao", "taxa adm", "guarida imoveis"]},
-    13: {"empresa": "ORGANICO",     "desc": "Orgânico — Oficial Manutenção 44h",
-         "keywords": ["oficial manutencao", "marco aurelio", "marcos aurelio", "organico"]},
-    14: {"empresa": "ORGANICO",     "desc": "Orgânico — Remuneração Subsíndico",
+    13: {"empresa": "ORGANICO", "desc": "Orgânico — Oficial Manutenção 44h",
+         "keywords": ["oficial manutencao", "marco aurelio", "marcos aurelio", "organico", "salario marco aurelio"]},
+    14: {"empresa": "ORGANICO", "desc": "Orgânico — Remuneração Subsíndico",
          "keywords": ["subsidico", "pro-labore subsidico", "remuneracao subsidico"]},
-    17: {"empresa": "FG PISCINAS",  "desc": "FG Piscinas — Limpeza/Química",
-         "keywords": ["fg piscinas", "piscina", "quimica", "espelho d'agua", "espelho dagua"]},
-    18: {"empresa": "ELITE",        "desc": "Elite — Elevadores Atlas",
-         "keywords": ["elite", "elevador", "atlas", "schindler", "manut elevador"]},
-    19: {"empresa": "STEMAC",       "desc": "Stemac — Gerador",
-         "keywords": ["stemac", "gerador", "motor gerador"]},
-    20: {"empresa": "BELLINI",      "desc": "Bellini — Consultoria Jurídica",
-         "keywords": ["bellini", "juridic", "advocac"]},
-    21: {"empresa": "AUDI PASTAS",  "desc": "Audi Pastas — Auditoria Externa",
-         "keywords": ["audi pastas", "auditoria", "taborda"]},
-    24: {"empresa": "MULTIPLAN",    "desc": "Multiplan — Lixo/Entulho",
+    17: {"empresa": "FG PISCINAS", "desc": "FG Piscinas — Limpeza/Química",
+         "keywords": ["fg piscinas", "piscina", "quimica", "espelho d'agua", "espelho dagua", "manut.piscina"]},
+    18: {"empresa": "ELITE", "desc": "Elite — Elevadores Atlas",
+         "keywords": ["elite", "elevador", "atlas", "schindler", "manut elevador", "manut.elevador"]},
+    19: {"empresa": "STEMAC", "desc": "Stemac — Gerador",
+         "keywords": ["stemac", "gerador", "motor gerador", "manut. gerador"]},
+    20: {"empresa": "BELLINI", "desc": "Bellini — Consultoria Jurídica",
+         "keywords": ["bellini", "juridic", "advocac", "assessoria juridica"]},
+    21: {"empresa": "AUDI PASTAS", "desc": "Audi Pastas — Auditoria Externa",
+         "keywords": ["audi pastas", "auditoria", "taborda", "pastas contabeis"]},
+    24: {"empresa": "MULTIPLAN", "desc": "Multiplan — Lixo/Entulho",
          "keywords": ["multiplan", "lixo", "entulho"]},
-    25: {"empresa": "ALPINISMO",    "desc": "Alpinismo — Fachada",
-         "keywords": ["alpinismo", "fachada", "uperclean"]},
-    26: {"empresa": "DEMANDA",      "desc": "Manutenção Bombas Recalque",
-         "keywords": ["bomba", "recalque"]},
-    27: {"empresa": "",             "desc": "Manutenção Interfones",
+    25: {"empresa": "ALPINISMO", "desc": "Alpinismo — Fachada",
+         "keywords": ["alpinismo", "fachada", "uperclean", "rest.fachada"]},
+    26: {"empresa": "DEMANDA", "desc": "Manutenção Bombas Recalque",
+         "keywords": ["bomba", "recalque", "manut.bomba dagua"]},
+    27: {"empresa": "", "desc": "Manutenção Interfones",
          "keywords": ["interfone", "porteiro eletronico", "mactel"]},
-    28: {"empresa": "",             "desc": "Manutenção Predial",
-         "keywords": ["manutencao predial", "predial", "hidrojateamento", "esgoto", "portao", "hidraulico", "chumbador"]},
-    29: {"empresa": "",             "desc": "Incêndio",
-         "keywords": ["incendio", "hidrante", "extintor", "spda"]},
-    30: {"empresa": "",             "desc": "Obrigações Legais",
-         "keywords": ["obrigacao legal", "certificado", "laudo", "spda", "ppra", "pcmso", "qualidade do ar", "ltip"]},
-    31: {"empresa": "",             "desc": "Controle Pragas / Caixa D'água",
-         "keywords": ["praga", "dedetiz", "caixa d agua", "limpeza do reservatorio", "eco-ambiental"]},
-    32: {"empresa": "",             "desc": "Paisagismo",
+    28: {"empresa": "", "desc": "Manutenção Predial",
+         "keywords": ["manutencao predial", "predial", "hidrojateamento", "esgoto", "portao", "hidraulico", "desobstrucao", "manut.portao"]},
+    29: {"empresa": "", "desc": "Incêndio",
+         "keywords": ["incendio", "hidrante", "extintor"]},
+    30: {"empresa": "", "desc": "Obrigações Legais",
+         "keywords": ["obrigacao legal", "certificado", "laudo", "spda", "ppra", "pcmso", "qualidade do ar", "ltip", "laudo tecnico", "ativa medicina", "toxilab", "brenner carvalho"]},
+    31: {"empresa": "", "desc": "Controle Pragas / Caixa D'água",
+         "keywords": ["praga", "dedetiz", "caixa d agua", "limpeza do reservatorio", "eco-ambiental", "limpeza caixa dagua"]},
+    32: {"empresa": "", "desc": "Paisagismo",
          "keywords": ["paisagismo"]},
-    35: {"empresa": "",             "desc": "Chaveiro",
+    35: {"empresa": "", "desc": "Chaveiro",
          "keywords": ["chaveiro"]},
-    36: {"empresa": "",             "desc": "Lâmpadas",
+    36: {"empresa": "", "desc": "Lâmpadas",
          "keywords": ["lampada", "lampadas"]},
-    37: {"empresa": "",             "desc": "Obras Diversas",
-         "keywords": ["alvenaria", "serralheria", "obra", "mureta", "totens"]},
-    38: {"empresa": "",             "desc": "Material Ferragem/Elétrica/Hidráulica",
-         "keywords": ["ferragem", "eletrica", "hidraulica", "ferrament", "procal", "material para manutencao", "material reforma", "material constr", "material pintura"]},
-    39: {"empresa": "",             "desc": "Material Expediente",
-         "keywords": ["expediente", "escritorio", "impressora", "fortpel"]},
-    40: {"empresa": "",             "desc": "Material Limpeza",
-         "keywords": ["material limpeza", "consumivel", "descartaveis"]},
-    41: {"empresa": "ELITE",        "desc": "Elite — Peças Elevador",
-         "keywords": ["peca elevador", "pecas elevador", "conserto elevador"]},
-    42: {"empresa": "DEMANDA",      "desc": "Móveis e Utensílios",
+    37: {"empresa": "", "desc": "Obras Diversas",
+         "keywords": ["alvenaria", "serralheria", "obra", "mureta", "totens", "benfeitorias"]},
+    38: {"empresa": "", "desc": "Material Ferragem/Elétrica/Hidráulica",
+         "keywords": ["ferragem", "eletrica", "hidraulica", "ferrament", "procal", "material para manutencao", "material reforma", "material constr", "material pintura", "compra material", "compra mat. eletrico"]},
+    39: {"empresa": "", "desc": "Material Expediente",
+         "keywords": ["expediente", "escritorio", "impressora", "fortpel", "mat.expediente", "mat.escritorio"]},
+    40: {"empresa": "", "desc": "Material Limpeza",
+         "keywords": ["material limpeza", "consumivel", "descartaveis", "mat.limpeza"]},
+    41: {"empresa": "ELITE", "desc": "Elite — Peças Elevador",
+         "keywords": ["peca elevador", "pecas elevador", "conserto elevador", "elevador pecas"]},
+    42: {"empresa": "DEMANDA", "desc": "Móveis e Utensílios",
          "keywords": ["movel", "utensilio", "copa funcionarios"]},
-    43: {"empresa": "",             "desc": "Peças Ar Condicionado",
+    43: {"empresa": "", "desc": "Peças Ar Condicionado",
          "keywords": ["ar condicionado", "exaustor"]},
-    44: {"empresa": "",             "desc": "Peças Extintores/Hidrantes",
+    44: {"empresa": "", "desc": "Peças Extintores/Hidrantes",
          "keywords": ["extintor", "hidrante"]},
-    45: {"empresa": "",             "desc": "Peças Gerador / Óleo Diesel",
+    45: {"empresa": "", "desc": "Peças Gerador / Óleo Diesel",
          "keywords": ["grupo gerador", "oleo diesel", "diesel", "bateria gerador"]},
-    46: {"empresa": "",             "desc": "Peças Catracas",
+    46: {"empresa": "", "desc": "Peças Catracas",
          "keywords": ["catraca"]},
-    49: {"empresa": "",             "desc": "Telefonia/Internet",
-         "keywords": ["telefon", "internet", "claro", "vivo"]},
-    50: {"empresa": "",             "desc": "Correio/Motoboy",
+    49: {"empresa": "", "desc": "Telefonia/Internet",
+         "keywords": ["telefon", "internet", "claro", "vivo", "desp.celular"]},
+    50: {"empresa": "", "desc": "Correio/Motoboy",
          "keywords": ["correio", "motoboy", "sedex"]},
-    51: {"empresa": "",             "desc": "Impostos DIRF/DARF/ISS/PIS/COFINS",
-         "keywords": ["dirf", "darf", "issqn", "pis", "cofins", "imposto", "inss", "fgts", "secovimed", "efd-reinf"]},
-    52: {"empresa": "",             "desc": "Assembleia",
+    51: {"empresa": "", "desc": "Impostos DIRF/DARF/ISS/PIS/COFINS",
+         "keywords": ["dirf", "darf", "issqn", "pis", "cofins", "imposto", "inss", "fgts", "secovimed", "efd-reinf", "retencao issqn"]},
+    52: {"empresa": "", "desc": "Assembleia",
          "keywords": ["assembleia", "reuniao de conselho"]},
-    53: {"empresa": "",             "desc": "Custas Judiciais",
+    53: {"empresa": "", "desc": "Custas Judiciais",
          "keywords": ["custas", "judicial", "processo"]},
-    54: {"empresa": "GOOGLE",       "desc": "Google — Hospedagem/Domínio",
+    54: {"empresa": "GOOGLE", "desc": "Google — Hospedagem/Domínio",
          "keywords": ["google", "hospedagem", "dominio"]},
-    59: {"empresa": "",             "desc": "Água e Esgoto",
+    59: {"empresa": "", "desc": "Água e Esgoto",
          "keywords": ["agua", "esgoto", "corsan", "dmae", "consumo dagua"]},
-    60: {"empresa": "",             "desc": "Energia Elétrica",
+    60: {"empresa": "", "desc": "Energia Elétrica",
          "keywords": ["energia", "eletrica", "ceee", "consumo luz"]},
-    61: {"empresa": "",             "desc": "Seguro",
-         "keywords": ["seguro", "tokio marine"]},
-    65: {"empresa": "",             "desc": "Despesas Reembolsáveis",
-         "keywords": ["reembolso", "reembolsavel", "ressarcimento", "uber", "refeicao", "almocos"]},
-    66: {"empresa": "",             "desc": "Honorários Advocatícios",
+    61: {"empresa": "", "desc": "Seguro",
+         "keywords": ["seguro", "tokio marine", "seguro de vida"]},
+    65: {"empresa": "", "desc": "Despesas Reembolsáveis",
+         "keywords": ["reembolso", "reembolsavel", "ressarcimento", "uber", "refeicao", "almocos", "reemb.mat"]},
+    66: {"empresa": "", "desc": "Honorários Advocatícios",
          "keywords": ["honorario", "advocaticio"]},
-    67: {"empresa": "",             "desc": "Ampliação CFTV",
+    67: {"empresa": "", "desc": "Ampliação CFTV",
          "keywords": ["cftv", "camera"]},
-    68: {"empresa": "",             "desc": "Transferências Entre Contas",
+    68: {"empresa": "", "desc": "Transferências Entre Contas",
          "keywords": ["transferencia entre contas", "aplicacao", "envio /transf"]},
 }
 
@@ -170,19 +171,23 @@ def norm(texto):
     t = unicodedata.normalize("NFKD", str(texto).lower())
     return "".join(c for c in t if not unicodedata.combining(c))
 
+
 def mes_anterior():
     hoje = date.today()
     primeiro_do_mes = hoje.replace(day=1)
     ultimo_mes = primeiro_do_mes - relativedelta(months=1)
     return ultimo_mes.month, ultimo_mes.year
 
+
 def obter_mes_ano_execucao():
     if MANUAL_MES and MANUAL_ANO:
         return int(MANUAL_MES), int(MANUAL_ANO)
     return mes_anterior()
 
+
 def col_para_indice(col_letra):
     return ord(col_letra.upper()) - ord("A") + 1
+
 
 def limpar_valor_brl_para_float(valor_str):
     s = str(valor_str).replace("R$", "").replace(" ", "").strip()
@@ -190,8 +195,18 @@ def limpar_valor_brl_para_float(valor_str):
     s = s.replace("+", "").replace("-", "")
     return float(s)
 
+
 def formatar_brl(valor):
     return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def salvar_debug_texto(driver, nome_arquivo, limite=5000):
+    try:
+        texto = driver.find_element(By.TAG_NAME, "body").text
+        with open(nome_arquivo, "w", encoding="utf-8") as f:
+            f.write(texto[:limite])
+    except Exception:
+        pass
 
 
 # ── 1. COLETAR EXTRATO DA GUARIDA ─────────────────────────────
@@ -248,15 +263,31 @@ def coletar_extrato(mes, ano):
         print("   Aguardando dashboard...")
         time.sleep(8)
 
-       print("   Abrindo extrato...")
-driver.get(GUARIDA_URL)
-time.sleep(8)
+        print("   Abrindo extrato...")
+        driver.get(GUARIDA_URL)
+        time.sleep(8)
 
-print("   Texto da página do extrato (pré-filtro):")
-print(driver.find_element(By.TAG_NAME, "body").text[:1500])
+        print("   Texto da página do extrato (pré-filtro):")
+        try:
+            print(driver.find_element(By.TAG_NAME, "body").text[:1500])
+        except Exception:
+            print("   (Não foi possível ler o texto do body neste momento)")
 
-print(f"   Selecionando competência {mes:02d}/{ano}...")
-_selecionar_competencia(driver, wait, mes, ano)
+        print(f"   Selecionando competência {mes:02d}/{ano}...")
+        _selecionar_competencia(driver, wait, mes, ano)
+
+        print("   Coletando cards do extrato...")
+        lancamentos = _scrape_lancamentos_cards(driver, mes, ano)
+
+        print(f"   {len(lancamentos)} débitos coletados.")
+
+    finally:
+        driver.quit()
+
+    return lancamentos
+
+
+def _selecionar_competencia(driver, wait, mes, ano):
     meses_abrev = {
         1: "jan", 2: "fev", 3: "mar", 4: "abr", 5: "mai", 6: "jun",
         7: "jul", 8: "ago", 9: "set", 10: "out", 11: "nov", 12: "dez"
@@ -265,7 +296,6 @@ _selecionar_competencia(driver, wait, mes, ano)
 
     time.sleep(3)
 
-    # 1) tenta clicar no campo/caixa da competência por vários seletores
     seletores_tentativa = [
         "//input[contains(@placeholder, 'compet')]",
         "//div[contains(., 'Selecione uma competência')]",
@@ -276,6 +306,7 @@ _selecionar_competencia(driver, wait, mes, ano)
     ]
 
     abriu = False
+
     for xpath in seletores_tentativa:
         try:
             elem = WebDriverWait(driver, 5).until(
@@ -284,11 +315,10 @@ _selecionar_competencia(driver, wait, mes, ano)
             driver.execute_script("arguments[0].click();", elem)
             abriu = True
             break
-        except:
+        except Exception:
             continue
 
     if not abriu:
-        # fallback: tenta clicar em qualquer campo estilo select / combobox
         try:
             possiveis = driver.find_elements(
                 By.XPATH,
@@ -300,16 +330,16 @@ _selecionar_competencia(driver, wait, mes, ano)
                     driver.execute_script("arguments[0].click();", p)
                     abriu = True
                     break
-        except:
+        except Exception:
             pass
 
     if not abriu:
         driver.save_screenshot("/tmp/erro_competencia.png")
+        salvar_debug_texto(driver, "/tmp/debug_competencia.txt")
         raise Exception("Não foi possível abrir o seletor de competência.")
 
     time.sleep(2)
 
-    # 2) tenta ajustar o ano, se existir navegação
     for _ in range(8):
         body_txt = driver.find_element(By.TAG_NAME, "body").text
         if str(ano) in body_txt:
@@ -323,12 +353,11 @@ _selecionar_competencia(driver, wait, mes, ano)
             try:
                 driver.execute_script("arguments[0].click();", botoes_prev[0])
                 time.sleep(1)
-            except:
+            except Exception:
                 pass
         else:
             break
 
-    # 3) clica no mês abreviado
     mes_clicado = False
     tentativas_mes = [
         f"//*[normalize-space(text())='{mes_txt}']",
@@ -345,16 +374,16 @@ _selecionar_competencia(driver, wait, mes, ano)
             driver.execute_script("arguments[0].click();", mes_btn)
             mes_clicado = True
             break
-        except:
+        except Exception:
             continue
 
     if not mes_clicado:
         driver.save_screenshot("/tmp/erro_mes.png")
+        salvar_debug_texto(driver, "/tmp/debug_mes.txt")
         raise Exception(f"Não foi possível selecionar o mês '{mes_txt}'.")
 
     time.sleep(1)
 
-    # 4) confirma
     confirmou = False
     xpaths_confirmar = [
         "//*[normalize-space(text())='CONFIRMAR']",
@@ -371,14 +400,16 @@ _selecionar_competencia(driver, wait, mes, ano)
             driver.execute_script("arguments[0].click();", confirmar)
             confirmou = True
             break
-        except:
+        except Exception:
             continue
 
     if not confirmou:
         driver.save_screenshot("/tmp/erro_confirmar.png")
+        salvar_debug_texto(driver, "/tmp/debug_confirmar.txt")
         raise Exception("Não foi possível confirmar a competência.")
 
     time.sleep(6)
+
 
 def _scrape_lancamentos_cards(driver, mes, ano):
     """
@@ -388,12 +419,10 @@ def _scrape_lancamentos_cards(driver, mes, ano):
     Débito (R$)
     Crédito (R$)
     Saldo (R$)
-
-    Aqui lemos o texto completo da página e quebramos por datas.
     """
+
     texto = driver.find_element(By.TAG_NAME, "body").text
 
-    # Tenta cortar só a partir da área útil do extrato
     marcadores_inicio = [
         "Saldo Anterior (R$)",
         "Débito (R$)",
@@ -420,7 +449,6 @@ def _scrape_lancamentos_cards(driver, mes, ano):
         if len(linhas) < 3:
             continue
 
-        # primeira linha deve ser data
         m_data = re.match(r"^(\d{2}/\d{2}/\d{4})$", linhas[0])
         if not m_data:
             continue
@@ -432,7 +460,6 @@ def _scrape_lancamentos_cards(driver, mes, ano):
 
         descricao = linhas[1].strip()
 
-        # ignora saldo anterior
         if "saldo mes anterior" in norm(descricao):
             continue
 
@@ -440,7 +467,6 @@ def _scrape_lancamentos_cards(driver, mes, ano):
 
         for i, linha in enumerate(linhas):
             linha_n = norm(linha)
-
             if "debito (r$)" in linha_n:
                 resto = linha.replace("Débito (R$)", "").replace("Debito (R$)", "").strip()
 
