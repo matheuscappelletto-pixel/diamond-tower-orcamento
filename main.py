@@ -1,7 +1,7 @@
 """
 DIAMOND TOWER — Automação Orçamentária
 Roda via GitHub Actions:
-1. Acessa Guarida (Login em 2 Etapas) e baixa extrato
+1. Acessa Guarida (Login 2 Etapas / Next.js) e baixa extrato
 2. Classifica lançamentos rigorosamente com Claude AI
 3. Lança na planilha Google Sheets criando COMENTÁRIOS com o histórico
 4. Envia e-mail com resumo
@@ -24,6 +24,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
@@ -169,7 +171,7 @@ def col_para_indice(col_letra):
     """F→5, G→6, etc. (1-indexed para gspread)"""
     return ord(col_letra.upper()) - ord('A') + 1
 
-# ── 1. COLETAR EXTRATO DA GUARIDA ─────────────────────────────
+# ── 1. COLETAR EXTRATO DA GUARIDA (REACT SAFE) ────────────────
 
 def coletar_extrato(mes, ano):
     print(f"\n[1/4] Acessando Guarida — extrato {mes:02d}/{ano}")
@@ -178,92 +180,96 @@ def coletar_extrato(mes, ano):
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1280,900")
+    opts.add_argument("--window-size=1920,1080")
 
     driver = webdriver.Chrome(options=opts)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30) # Maior tolerância
     lancamentos = []
 
     try:
-        driver.get(GUARIDA_URL)
-        time.sleep(3)
+        print("   Acessando página de login...")
+        driver.get("https://agenciavirtual3.guarida.com.br/login")
+        time.sleep(6) # Deixa a página dar 'hydrate'
 
-        print("   Fazendo login (Etapa 1 - Email)...")
+        print("   Fazendo login (Etapas React.js Human-Like)...")
         try:
-            campo_email = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "input[type='email'], input[name='email'], input[id*='login'], input[id*='user']")
+            # 1. Email + TAB + ENTER
+            campo_email = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "input[type='email'], input[name='email']")
             ))
+            campo_email.click()
+            time.sleep(0.5)
             campo_email.send_keys(GUARIDA_USER)
+            time.sleep(1)
+            campo_email.send_keys(Keys.TAB)
+            time.sleep(0.5)
+            ActionChains(driver).send_keys(Keys.ENTER).perform()
             
-            # Clicar no botão 'Acessar'
-            botao_acessar = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button")
-            botao_acessar.click()
-            time.sleep(4) 
+            time.sleep(5) # Delay para a tela de senha aparecer sem mudar a página
 
-            print("   Fazendo login (Etapa 2 - Senha)...")
-            campo_senha = wait.until(EC.presence_of_element_located(
+            # 2. Senha + TAB + ENTER
+            campo_senha = wait.until(EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, "input[type='password']")
             ))
+            campo_senha.click()
+            time.sleep(0.5)
             campo_senha.send_keys(GUARIDA_PASS)
-            
-            # Clicar em Entrar
-            botoes = driver.find_elements(By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button")
-            # Pega o último botão visível que deve ser o de login da segunda tela
-            if botoes:
-                botoes[-1].click()
-            time.sleep(6)
-        except Exception as e:
-            print(f"   Tentativa de login falhou... ({e})")
+            time.sleep(1)
+            campo_senha.send_keys(Keys.TAB)
+            time.sleep(0.5)
+            ActionChains(driver).send_keys(Keys.ENTER).perform()
 
-        # Ir para a tela de extrato
-        driver.get(GUARIDA_URL)
-        time.sleep(5)
+            time.sleep(10) # Tempo ocioso para logar e abrir o Dashboard (a imagem com os cartões)
+        except Exception as e:
+            print(f"   Aviso no Login Híbrido: {str(e)[:100]}. Testando clique Javascript direto...")
+            try:
+                # Fallback brutal se o "Abo" (TAB) não tiver ido
+                driver.execute_script("document.querySelector('button').click()")
+                time.sleep(6)
+            except:
+                pass
+
+        print("   Navegando do Dashboard para o Extrato...")
+        try:
+            # Na sua tela a URL correta depois do login é essa:
+            driver.get("https://agenciavirtual3.guarida.com.br/financeiro/extrato-condominio")
+            time.sleep(8)
+        except Exception as e:
+            print("   Erro na navegação do Extrato. Acesso falhou.")
 
         data_inicio = f"01/{mes:02d}/{ano}"
         data_fim    = f"{ultimo_dia(mes, ano):02d}/{mes:02d}/{ano}"
         print(f"   Período: {data_inicio} a {data_fim}")
 
         try:
-            # Tenta preencher a data 
-            inputs_data = driver.find_elements(By.CSS_SELECTOR, "input[type='date'], input[placeholder*='0'], input[id*='data'], input[id*='date']")
+            # Seleção mecânica do período do Extrato
+            inputs_data = driver.find_elements(By.CSS_SELECTOR, "input[type='date'], input[id*='data'], input[id*='date']")
             if len(inputs_data) >= 2:
-                dt_inicio_iso = f"{ano}-{mes:02d}-01"
-                dt_fim_iso    = f"{ano}-{mes:02d}-{ultimo_dia(mes, ano):02d}"
-                
-                inputs_data[0].clear()
-                inputs_data[0].send_keys(dt_inicio_iso)
-                
-                inputs_data[1].clear()
-                inputs_data[1].send_keys(dt_fim_iso)
+                # Limpa e digita usando injeção Javascript (100% à prova de falhas de foco HTML)
+                driver.execute_script(f"arguments[0].value = '{ano}-{mes:02d}-01'; arguments[0].dispatchEvent(new Event('change'));", inputs_data[0])
+                driver.execute_script(f"arguments[0].value = '{ano}-{mes:02d}-{ultimo_dia(mes,ano):02d}'; arguments[0].dispatchEvent(new Event('change'));", inputs_data[1])
                 time.sleep(2)
 
-                # Clique fora
-                driver.execute_script("document.body.click();")
-                time.sleep(1)
-
-            btns = driver.find_elements(By.XPATH, "//*[contains(text(),'Pesquisar') or contains(text(),'Filtrar') or contains(text(),'Buscar') or contains(text(),'Consultar')]")
-            if btns:
-                driver.execute_script("arguments[0].scrollIntoView(true);", btns[0])
-                time.sleep(1)
-                btns[0].click()
-                time.sleep(5)
+            btn_filtro = driver.find_element(By.XPATH, "//*[contains(text(),'Pesquisar') or contains(text(),'Filtrar') or contains(text(),'Buscar')]")
+            driver.execute_script("arguments[0].click();", btn_filtro)
+            time.sleep(6)
         except Exception as e:
-            print(f"   Seleção de período falhou ({e}), coletando tudo visível...")
+            print(f"   Aviso: Seleção de data falhou, mas procuraremos capturar dados mesmo assim.")
 
-        print("   Coletando lançamentos...")
+        print("   Coletando dados da tabela de despesas...")
         lancamentos = _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=False)
         
-        # Testar contingência se não achar nada
         if not lancamentos:
-            print("   Tentando ler lançamentos da tela ignorando as datas estritas...")
+            print("   Tentando capturar elementos ignorando validação do mês...")
             lancamentos = _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=True)
 
-        print(f"   {len(lancamentos)} débitos encontrados.")
+        print(f"   {len(lancamentos)} débitos coletados.")
 
     finally:
         driver.quit()
 
     return lancamentos
+
 
 def _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=False):
     lancamentos = []
@@ -308,7 +314,7 @@ def _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=False):
                 "valor":     valor,
             })
 
-    # Fallback RegExp via Source se tabela falhar
+    # Fallback caso a tabela HTML não abra corretamente
     if not lancamentos:
         for m in re.finditer(r'(\d{2}/\d{2}/\d{4})\s+([\w\s\d./:,()#\-]+?)\s+-\s*([\d.,]+)', pagina_texto):
             data_str, desc, val_str = m.group(1), m.group(2).strip(), m.group(3)
@@ -335,7 +341,6 @@ def _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=False):
             unicos.append(l)
 
     return unicos
-
 
 # ── 2. CLASSIFICAR COM CLAUDE AI ──────────────────────────────
 
@@ -424,7 +429,7 @@ def _classificar_keywords(descricao):
 
 def lancar_no_sheets(lancamentos, classificacoes, mes, ano):
     if not lancamentos: return [], []
-    print(f"\n[3/4] Lançando valores e inserindo comentários de auditoria na planilha Google Sheets...")
+    print(f"\n[3/4] Lançando valores e inserindo comentários na planilha Google Sheets...")
 
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(
@@ -448,7 +453,7 @@ def lancar_no_sheets(lancamentos, classificacoes, mes, ano):
     if not col_letra: raise Exception(f"Mês {mes}/{ano} não mapeado para coluna!")
     
     col_idx = col_para_indice(col_letra)
-    sheet_id = ws.id # Precisamos disso para a API de Notas
+    sheet_id = ws.id 
 
     por_linha = {}
     nao_classificados = []
@@ -527,7 +532,7 @@ def lancar_no_sheets(lancamentos, classificacoes, mes, ano):
     if atualizacoes_valores:
         ws.batch_update(atualizacoes_valores)
         sh.batch_update({"requests": atualizacoes_notas})
-        print(f"   {len(atualizacoes_valores)} células (e seus comentários) atualizadas.")
+        print(f"   {len(atualizacoes_valores)} células (e seus comentários) atualizadas na Planilha Principal!")
     else:
         print("   Nenhum valor para atualizar.")
 
