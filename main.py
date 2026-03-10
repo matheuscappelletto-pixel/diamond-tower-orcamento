@@ -201,13 +201,6 @@ def ler_extrato_xlsx(caminho: Path):
 
     print(f"   Aba lida: {ws.title}")
     print(f"   Linhas: {ws.max_row} | Colunas: {ws.max_column}")
-    print("   Prévia das primeiras 15 linhas:")
-    for row in range(1, min(ws.max_row, 15) + 1):
-        vals = []
-        for col in range(1, min(ws.max_column, 8) + 1):
-            v = ws.cell(row, col).value
-            vals.append("" if v is None else str(v))
-        print(f"   L{row}: {vals}")
 
     header_row = None
     col_data = col_hist = col_debito = col_credito = None
@@ -253,6 +246,7 @@ def ler_extrato_xlsx(caminho: Path):
         raise Exception("Não foi possível localizar cabeçalhos DATA / HISTÓRICO / DÉBITO no extrato.")
 
     lancamentos = []
+    vistos = set()
 
     for row in range(header_row + 1, ws.max_row + 1):
         data_val = ws.cell(row, col_data).value
@@ -262,8 +256,6 @@ def ler_extrato_xlsx(caminho: Path):
         historico = "" if hist_val is None else str(hist_val).strip()
         debito = limpar_valor_excel(debito_val)
 
-        print(f"   Linha {row}: data={data_val} | hist={historico} | debito={debito_val} -> {debito}")
-
         if data_val is None and hist_val is None and debito_val is None:
             continue
 
@@ -272,31 +264,47 @@ def ler_extrato_xlsx(caminho: Path):
 
         hist_norm = norm(historico)
 
-        if hist_norm in ["historico", "conta", "saldo", "credito", "debito"]:
+        # ignora linhas de cabeçalho, totais e saldos
+        if hist_norm in ["historico", ""]:
             continue
-
         if "saldo mes anterior" in hist_norm:
             continue
-
-        if debito <= 0:
+        if hist_norm == "total":
+            continue
+        if "saldo final" in hist_norm:
+            continue
+        if "lancamentos futuros" in hist_norm:
             continue
 
+        # ignora linhas sem data válida
         if hasattr(data_val, "strftime"):
             data_str = data_val.strftime("%d/%m/%Y")
             mes = data_val.month
             ano = data_val.year
         else:
-            data_str = str(data_val).strip()
-            m = re.match(r"(\d{2})/(\d{2})/(\d{4})", data_str)
+            data_str = "" if data_val is None else str(data_val).strip()
+            m = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", data_str)
             if not m:
                 continue
             mes = int(m.group(2))
             ano = int(m.group(3))
 
+        # No extrato da Guarida, débitos vêm negativos.
+        # Se for zero ou vazio, não é lançamento de débito.
+        if debito == 0:
+            continue
+
+        valor = abs(debito)
+
+        chave = (data_str, historico[:120], round(valor, 2))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+
         lancamentos.append({
             "data": data_str,
             "descricao": historico,
-            "valor": abs(debito),
+            "valor": valor,
             "mes": mes,
             "ano": ano,
         })
