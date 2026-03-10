@@ -4,11 +4,20 @@ on:
   schedule:
     - cron: '0 13 5 * *'
   workflow_dispatch:
+    inputs:
+      manual_mes:
+        description: 'Mês para processamento manual (1-12). Deixe vazio para usar mês anterior.'
+        required: false
+        default: ''
+      manual_ano:
+        description: 'Ano para processamento manual (ex: 2025). Deixe vazio para usar mês anterior.'
+        required: false
+        default: ''
 
 jobs:
   lancar-extrato:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout do repositorio
@@ -31,6 +40,17 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Definir mes e ano da execucao
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "MANUAL_MES=${{ github.event.inputs.manual_mes }}" >> $GITHUB_ENV
+            echo "MANUAL_ANO=${{ github.event.inputs.manual_ano }}" >> $GITHUB_ENV
+          else
+            echo "MANUAL_MES=" >> $GITHUB_ENV
+            echo "MANUAL_ANO=" >> $GITHUB_ENV
+          fi
+
       - name: Executar lancamento
         env:
           GUARIDA_USER:      ${{ secrets.GUARIDA_USER }}
@@ -41,4 +61,6 @@ jobs:
           NOTIFY_EMAIL:      ${{ secrets.NOTIFY_EMAIL }}
           GMAIL_USER:        ${{ secrets.GMAIL_USER }}
           GMAIL_PASS:        ${{ secrets.GMAIL_PASS }}
+          MANUAL_MES:        ${{ env.MANUAL_MES }}
+          MANUAL_ANO:        ${{ env.MANUAL_ANO }}
         run: python main.py
