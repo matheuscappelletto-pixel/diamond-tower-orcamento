@@ -1,7 +1,7 @@
 """
 DIAMOND TOWER — Automação Orçamentária
 Roda via GitHub Actions:
-1. Acessa Guarida e baixa extrato do mês anterior
+1. Acessa Guarida (Login em 2 Etapas) e baixa extrato
 2. Classifica lançamentos rigorosamente com Claude AI
 3. Lança na planilha Google Sheets criando COMENTÁRIOS com o histórico
 4. Envia e-mail com resumo
@@ -188,45 +188,76 @@ def coletar_extrato(mes, ano):
         driver.get(GUARIDA_URL)
         time.sleep(3)
 
-        print("   Fazendo login...")
+        print("   Fazendo login (Etapa 1 - Email)...")
         try:
-            campo = wait.until(EC.presence_of_element_located(
+            campo_email = wait.until(EC.presence_of_element_located(
                 (By.CSS_SELECTOR, "input[type='email'], input[name='email'], input[id*='login'], input[id*='user']")
             ))
-            campo.send_keys(GUARIDA_USER)
-            driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(GUARIDA_PASS)
-            driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']").click()
-            time.sleep(4)
-        except Exception as e:
-            print(f"   Tentativa de login alternativa... ({e})")
+            campo_email.send_keys(GUARIDA_USER)
+            
+            # Clicar no botão 'Acessar'
+            botao_acessar = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button")
+            botao_acessar.click()
+            time.sleep(4) 
 
+            print("   Fazendo login (Etapa 2 - Senha)...")
+            campo_senha = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "input[type='password']")
+            ))
+            campo_senha.send_keys(GUARIDA_PASS)
+            
+            # Clicar em Entrar
+            botoes = driver.find_elements(By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button")
+            # Pega o último botão visível que deve ser o de login da segunda tela
+            if botoes:
+                botoes[-1].click()
+            time.sleep(6)
+        except Exception as e:
+            print(f"   Tentativa de login falhou... ({e})")
+
+        # Ir para a tela de extrato
         driver.get(GUARIDA_URL)
-        time.sleep(3)
+        time.sleep(5)
 
         data_inicio = f"01/{mes:02d}/{ano}"
         data_fim    = f"{ultimo_dia(mes, ano):02d}/{mes:02d}/{ano}"
         print(f"   Período: {data_inicio} a {data_fim}")
 
         try:
-            inputs_data = driver.find_elements(By.CSS_SELECTOR, "input[type='date'], input[placeholder*='data'], input[placeholder*='Data'], input[id*='data'], input[id*='date']")
+            # Tenta preencher a data 
+            inputs_data = driver.find_elements(By.CSS_SELECTOR, "input[type='date'], input[placeholder*='0'], input[id*='data'], input[id*='date']")
             if len(inputs_data) >= 2:
                 dt_inicio_iso = f"{ano}-{mes:02d}-01"
                 dt_fim_iso    = f"{ano}-{mes:02d}-{ultimo_dia(mes, ano):02d}"
+                
                 inputs_data[0].clear()
                 inputs_data[0].send_keys(dt_inicio_iso)
+                
                 inputs_data[1].clear()
                 inputs_data[1].send_keys(dt_fim_iso)
+                time.sleep(2)
+
+                # Clique fora
+                driver.execute_script("document.body.click();")
                 time.sleep(1)
 
             btns = driver.find_elements(By.XPATH, "//*[contains(text(),'Pesquisar') or contains(text(),'Filtrar') or contains(text(),'Buscar') or contains(text(),'Consultar')]")
             if btns:
+                driver.execute_script("arguments[0].scrollIntoView(true);", btns[0])
+                time.sleep(1)
                 btns[0].click()
-                time.sleep(3)
+                time.sleep(5)
         except Exception as e:
             print(f"   Seleção de período falhou ({e}), coletando tudo visível...")
 
         print("   Coletando lançamentos...")
-        lancamentos = _scrape_lancamentos(driver, mes, ano)
+        lancamentos = _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=False)
+        
+        # Testar contingência se não achar nada
+        if not lancamentos:
+            print("   Tentando ler lançamentos da tela ignorando as datas estritas...")
+            lancamentos = _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=True)
+
         print(f"   {len(lancamentos)} débitos encontrados.")
 
     finally:
@@ -234,7 +265,7 @@ def coletar_extrato(mes, ano):
 
     return lancamentos
 
-def _scrape_lancamentos(driver, mes, ano):
+def _scrape_lancamentos(driver, mes, ano, ignorar_mes_ano=False):
     lancamentos = []
     pagina_texto = driver.page_source
 
@@ -253,7 +284,9 @@ def _scrape_lancamentos(driver, mes, ano):
         partes = data_str.split('/')
         if len(partes) != 3: continue
         d, m, a = int(partes[0]), int(partes[1]), int(partes[2])
-        if m != mes or a != ano: continue
+        
+        if not ignorar_mes_ano:
+            if m != mes or a != ano: continue
 
         m_valor = re.search(re_valor_negativo, texto)
         if not m_valor: continue
@@ -281,7 +314,10 @@ def _scrape_lancamentos(driver, mes, ano):
             data_str, desc, val_str = m.group(1), m.group(2).strip(), m.group(3)
             partes = data_str.split('/')
             d, mes_val, ano_val = int(partes[0]), int(partes[1]), int(partes[2])
-            if mes_val != mes or ano_val != ano: continue
+            
+            if not ignorar_mes_ano:
+                if mes_val != mes or ano_val != ano: continue
+                
             val_str = val_str.replace('.', '').replace(',', '.')
             try:
                 valor = float(val_str)
@@ -299,6 +335,7 @@ def _scrape_lancamentos(driver, mes, ano):
             unicos.append(l)
 
     return unicos
+
 
 # ── 2. CLASSIFICAR COM CLAUDE AI ──────────────────────────────
 
@@ -386,6 +423,7 @@ def _classificar_keywords(descricao):
 # ── 3. LANÇAR NO GOOGLE SHEETS COM COMENTÁRIOS E HISTÓRICO ────
 
 def lancar_no_sheets(lancamentos, classificacoes, mes, ano):
+    if not lancamentos: return [], []
     print(f"\n[3/4] Lançando valores e inserindo comentários de auditoria na planilha Google Sheets...")
 
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
