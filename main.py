@@ -21,6 +21,7 @@ from pathlib import Path
 
 import anthropic
 from openpyxl import load_workbook
+from openpyxl.comments import Comment
 
 # ── Configuração ──────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ ENTRADAS_DIR = BASE_DIR / "entradas"
 PROCESSADOS_DIR = BASE_DIR / "processados"
 PF_PATH = BASE_DIR / "PF.xlsx"
 
-ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 
 # ── Mapeamento mês → coluna na planilha ───────────────────────
 
@@ -152,15 +153,11 @@ def limpar_valor_excel(v) -> float:
 
     s = s.replace("R$", "").replace(" ", "")
     s = s.replace(".", "").replace(",", ".")
-
-    # remove sinais
     s = s.replace("+", "").replace("-", "")
 
-    # se não tiver número válido, retorna 0
     if not re.search(r"\d", s):
         return 0.0
 
-    # mantém só números e ponto
     s = re.sub(r"[^0-9.]", "", s)
 
     if not s:
@@ -168,16 +165,12 @@ def limpar_valor_excel(v) -> float:
 
     try:
         return float(s)
-    except:
+    except Exception:
         return 0.0
 
 
 def col_para_indice(col_letra: str) -> int:
     return ord(col_letra.upper()) - ord("A") + 1
-
-
-def indice_para_col(idx: int) -> str:
-    return chr(ord("A") + idx - 1)
 
 
 # ── 1. Buscar arquivo de entrada ──────────────────────────────
@@ -264,7 +257,6 @@ def ler_extrato_xlsx(caminho: Path):
 
         hist_norm = norm(historico)
 
-        # ignora linhas de cabeçalho, totais e saldos
         if hist_norm in ["historico", ""]:
             continue
         if "saldo mes anterior" in hist_norm:
@@ -275,8 +267,13 @@ def ler_extrato_xlsx(caminho: Path):
             continue
         if "lancamentos futuros" in hist_norm:
             continue
+        if hist_norm.startswith("saldo final conta"):
+            continue
+        if hist_norm == "saldo geral":
+            continue
+        if hist_norm == "ressarcimento notas notas":
+            continue
 
-        # ignora linhas sem data válida
         if hasattr(data_val, "strftime"):
             data_str = data_val.strftime("%d/%m/%Y")
             mes = data_val.month
@@ -289,8 +286,6 @@ def ler_extrato_xlsx(caminho: Path):
             mes = int(m.group(2))
             ano = int(m.group(3))
 
-        # No extrato da Guarida, débitos vêm negativos.
-        # Se for zero ou vazio, não é lançamento de débito.
         if debito == 0:
             continue
 
@@ -316,6 +311,7 @@ def ler_extrato_xlsx(caminho: Path):
 
     return lancamentos
 
+
 # ── 3. Classificação ──────────────────────────────────────────
 
 def classificar_keywords(descricao: str):
@@ -334,7 +330,15 @@ def classificar_keywords(descricao: str):
 
 
 def classificar_com_claude(lancamentos):
-    print(f"[2/5] Classificando {len(lancamentos)} lançamentos com Claude AI...")
+    print(f"\n[2/5] Classificando {len(lancamentos)} lançamentos com Claude AI...")
+
+    if not ANTHROPIC_KEY:
+        print("   ANTHROPIC_KEY não configurada, usando fallback por keywords.")
+        return {
+            i: {"linha": classificar_keywords(l["descricao"])[0], "motivo": "Fallback Keywords sem Claude"}
+            for i, l in enumerate(lancamentos)
+        }
+
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
     categorias = "\n".join([
@@ -372,7 +376,7 @@ LANÇAMENTOS:
 Responda SOMENTE em JSON válido:
 {{
   "classificacoes": [
-    {{"n": 1, "linha": 13, "motivo": "..." }}
+    {{"n": 1, "linha": 13, "motivo": "..."}}
   ]
 }}
 """
@@ -432,9 +436,10 @@ def atualizar_pf(lancamentos, classificacoes):
 
     if len(anos_planilha) != 1:
         raise Exception("O arquivo de entrada possui mais de um período-base de PF.")
-    ano_base = list(anos_planilha)[0]
 
+    ano_base = list(anos_planilha)[0]
     aba_nome = f"PF {ano_base}"
+
     if aba_nome not in wb.sheetnames:
         raise Exception(f"Aba não encontrada no PF.xlsx: {aba_nome}")
 
@@ -494,8 +499,6 @@ def atualizar_pf(lancamentos, classificacoes):
 
         nota_atual = cell.comment.text if cell.comment else ""
         nota_final = adicionar_nota_existente(nota_atual, dados["itens"])
-
-        from openpyxl.comments import Comment
         cell.comment = Comment(nota_final, "Automação")
 
         resumo.append({
