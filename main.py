@@ -142,14 +142,34 @@ def formatar_brl(valor: float) -> str:
 def limpar_valor_excel(v) -> float:
     if v is None:
         return 0.0
+
     if isinstance(v, (int, float)):
         return float(v)
+
     s = str(v).strip()
     if not s:
         return 0.0
+
     s = s.replace("R$", "").replace(" ", "")
     s = s.replace(".", "").replace(",", ".")
-    return float(s)
+
+    # remove sinais
+    s = s.replace("+", "").replace("-", "")
+
+    # se não tiver número válido, retorna 0
+    if not re.search(r"\d", s):
+        return 0.0
+
+    # mantém só números e ponto
+    s = re.sub(r"[^0-9.]", "", s)
+
+    if not s:
+        return 0.0
+
+    try:
+        return float(s)
+    except:
+        return 0.0
 
 
 def col_para_indice(col_letra: str) -> int:
@@ -190,20 +210,27 @@ def ler_extrato_xlsx(caminho: Path):
 
         vals_norm = [norm(v) for v in valores]
 
+        achou_data = None
+        achou_hist = None
+        achou_debito = None
+        achou_credito = None
+
         for i, v in enumerate(vals_norm):
             if v == "data":
-                for j, vv in enumerate(vals_norm):
-                    if "historico" in vv:
-                        header_row = row
-                        col_data = i + 1
-                        col_hist = j + 1
-                        break
-        if header_row:
-            for j, vv in enumerate(vals_norm):
-                if "debito" in vv:
-                    col_debito = j + 1
-                if "credito" in vv:
-                    col_credito = j + 1
+                achou_data = i + 1
+            elif "historico" in v:
+                achou_hist = i + 1
+            elif "debito" in v:
+                achou_debito = i + 1
+            elif "credito" in v:
+                achou_credito = i + 1
+
+        if achou_data and achou_hist and achou_debito:
+            header_row = row
+            col_data = achou_data
+            col_hist = achou_hist
+            col_debito = achou_debito
+            col_credito = achou_credito
             break
 
     if not header_row or not col_data or not col_hist or not col_debito:
@@ -223,7 +250,13 @@ def ler_extrato_xlsx(caminho: Path):
         if not historico:
             continue
 
-        if "saldo mes anterior" in norm(historico):
+        hist_norm = norm(historico)
+
+        # ignora linhas-resumo / cabeçalhos repetidos
+        if hist_norm in ["historico", "conta", "saldo", "credito", "debito"]:
+            continue
+
+        if "saldo mes anterior" in hist_norm:
             continue
 
         debito = limpar_valor_excel(debito_val)
