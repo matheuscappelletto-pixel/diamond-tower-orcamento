@@ -1,66 +1,52 @@
-name: Diamond Tower — Lancamento Mensal
+name: Diamond Tower — Lancamento XLSX
 
 on:
-  schedule:
-    - cron: '0 13 5 * *'
+  push:
+    paths:
+      - 'entradas/*.xlsx'
+      - 'PF.xlsx'
+      - 'main.py'
+      - '.github/workflows/lancamento.yml'
   workflow_dispatch:
-    inputs:
-      manual_mes:
-        description: 'Mês para processamento manual (1-12). Deixe vazio para usar mês anterior.'
-        required: false
-        default: ''
-      manual_ano:
-        description: 'Ano para processamento manual (ex: 2025). Deixe vazio para usar mês anterior.'
-        required: false
-        default: ''
 
 jobs:
   lancar-extrato:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout do repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Instalar Chrome
-        run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update -q
-          sudo apt-get install -y google-chrome-stable
-
       - name: Instalar dependencias Python
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install anthropic openpyxl
 
-      - name: Definir mes e ano da execucao
-        shell: bash
+      - name: Garantir pastas
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "MANUAL_MES=${{ github.event.inputs.manual_mes }}" >> $GITHUB_ENV
-            echo "MANUAL_ANO=${{ github.event.inputs.manual_ano }}" >> $GITHUB_ENV
-          else
-            echo "MANUAL_MES=" >> $GITHUB_ENV
-            echo "MANUAL_ANO=" >> $GITHUB_ENV
-          fi
+          mkdir -p entradas
+          mkdir -p processados
 
-      - name: Executar lancamento
+      - name: Executar automacao
         env:
-          GUARIDA_USER:      ${{ secrets.GUARIDA_USER }}
-          GUARIDA_PASS:      ${{ secrets.GUARIDA_PASS }}
-          ANTHROPIC_KEY:     ${{ secrets.ANTHROPIC_KEY }}
-          SPREADSHEET_ID:    ${{ secrets.SPREADSHEET_ID }}
-          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
-          NOTIFY_EMAIL:      ${{ secrets.NOTIFY_EMAIL }}
-          GMAIL_USER:        ${{ secrets.GMAIL_USER }}
-          GMAIL_PASS:        ${{ secrets.GMAIL_PASS }}
-          MANUAL_MES:        ${{ env.MANUAL_MES }}
-          MANUAL_ANO:        ${{ env.MANUAL_ANO }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
         run: python main.py
+
+      - name: Commit de saida
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PF.xlsx processados/ entradas/
+          git diff --cached --quiet || git commit -m "Processa extrato automaticamente"
+          git push
