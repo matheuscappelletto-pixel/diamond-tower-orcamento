@@ -248,71 +248,137 @@ def coletar_extrato(mes, ano):
         print("   Aguardando dashboard...")
         time.sleep(8)
 
-        print("   Abrindo extrato...")
-        driver.get(GUARIDA_URL)
-        time.sleep(8)
+       print("   Abrindo extrato...")
+driver.get(GUARIDA_URL)
+time.sleep(8)
 
-        print(f"   Selecionando competência {mes:02d}/{ano}...")
-        _selecionar_competencia(driver, wait, mes, ano)
+print("   Texto da página do extrato (pré-filtro):")
+print(driver.find_element(By.TAG_NAME, "body").text[:1500])
 
-        print("   Coletando cards do extrato...")
-        lancamentos = _scrape_lancamentos_cards(driver, mes, ano)
-
-        print(f"   {len(lancamentos)} débitos coletados.")
-
-    finally:
-        driver.quit()
-
-    return lancamentos
-
-
-def _selecionar_competencia(driver, wait, mes, ano):
+print(f"   Selecionando competência {mes:02d}/{ano}...")
+_selecionar_competencia(driver, wait, mes, ano)
     meses_abrev = {
         1: "jan", 2: "fev", 3: "mar", 4: "abr", 5: "mai", 6: "jun",
         7: "jul", 8: "ago", 9: "set", 10: "out", 11: "nov", 12: "dez"
     }
     mes_txt = meses_abrev[mes]
 
-    # Abre o seletor de competência
-    seletor = wait.until(
-        EC.element_to_be_clickable(
-            (By.XPATH, "//*[contains(translate(., 'abcdefghijklmnopqrstuvwxyzáàâãéêíóôõúç', 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÀÂÃÉÊÍÓÔÕÚÇ'), 'SELECIONE UMA COMPETÊNCIA')]")
-        )
-    )
-    driver.execute_script("arguments[0].click();", seletor)
+    time.sleep(3)
+
+    # 1) tenta clicar no campo/caixa da competência por vários seletores
+    seletores_tentativa = [
+        "//input[contains(@placeholder, 'compet')]",
+        "//div[contains(., 'Selecione uma competência')]",
+        "//p[contains(., 'Selecione uma competência')]",
+        "//*[contains(., 'competência')]",
+        "//*[contains(., 'competencia')]",
+        "//label[contains(., 'compet')]",
+    ]
+
+    abriu = False
+    for xpath in seletores_tentativa:
+        try:
+            elem = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            driver.execute_script("arguments[0].click();", elem)
+            abriu = True
+            break
+        except:
+            continue
+
+    if not abriu:
+        # fallback: tenta clicar em qualquer campo estilo select / combobox
+        try:
+            possiveis = driver.find_elements(
+                By.XPATH,
+                "//div[@role='button' or @role='combobox' or contains(@class,'MuiInputBase-root') or contains(@class,'MuiOutlinedInput-root')]"
+            )
+            for p in possiveis:
+                txt = (p.text or "").lower()
+                if "compet" in txt or "selecione" in txt:
+                    driver.execute_script("arguments[0].click();", p)
+                    abriu = True
+                    break
+        except:
+            pass
+
+    if not abriu:
+        driver.save_screenshot("/tmp/erro_competencia.png")
+        raise Exception("Não foi possível abrir o seletor de competência.")
+
     time.sleep(2)
 
-    # Tenta ajustar o ano se necessário
-    body_txt = driver.find_element(By.TAG_NAME, "body").text
-    tentativas = 0
-    while str(ano) not in body_txt and tentativas < 5:
+    # 2) tenta ajustar o ano, se existir navegação
+    for _ in range(8):
+        body_txt = driver.find_element(By.TAG_NAME, "body").text
+        if str(ano) in body_txt:
+            break
+
         botoes_prev = driver.find_elements(
             By.XPATH,
-            "//button[@aria-label='Previous month' or @aria-label='Previous year' or contains(., '<')]"
+            "//button[contains(@aria-label,'Previous') or contains(@aria-label,'Anterior') or contains(., '<')]"
         )
         if botoes_prev:
-            driver.execute_script("arguments[0].click();", botoes_prev[0])
-            time.sleep(1)
-            body_txt = driver.find_element(By.TAG_NAME, "body").text
-            tentativas += 1
+            try:
+                driver.execute_script("arguments[0].click();", botoes_prev[0])
+                time.sleep(1)
+            except:
+                pass
         else:
             break
 
-    # Clica no mês
-    mes_btn = wait.until(
-        EC.element_to_be_clickable((By.XPATH, f"//*[normalize-space(text())='{mes_txt}']"))
-    )
-    driver.execute_script("arguments[0].click();", mes_btn)
+    # 3) clica no mês abreviado
+    mes_clicado = False
+    tentativas_mes = [
+        f"//*[normalize-space(text())='{mes_txt}']",
+        f"//*[contains(@class,'MuiPickersMonth-monthButton') and normalize-space(text())='{mes_txt}']",
+        f"//button[normalize-space(text())='{mes_txt}']",
+        f"//div[normalize-space(text())='{mes_txt}']",
+    ]
+
+    for xpath in tentativas_mes:
+        try:
+            mes_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            driver.execute_script("arguments[0].click();", mes_btn)
+            mes_clicado = True
+            break
+        except:
+            continue
+
+    if not mes_clicado:
+        driver.save_screenshot("/tmp/erro_mes.png")
+        raise Exception(f"Não foi possível selecionar o mês '{mes_txt}'.")
+
     time.sleep(1)
 
-    # Confirma
-    confirmar = wait.until(
-        EC.element_to_be_clickable((By.XPATH, "//*[normalize-space(text())='CONFIRMAR']"))
-    )
-    driver.execute_script("arguments[0].click();", confirmar)
+    # 4) confirma
+    confirmou = False
+    xpaths_confirmar = [
+        "//*[normalize-space(text())='CONFIRMAR']",
+        "//*[normalize-space(text())='Confirmar']",
+        "//button[contains(., 'CONFIRMAR')]",
+        "//button[contains(., 'Confirmar')]",
+    ]
+
+    for xpath in xpaths_confirmar:
+        try:
+            confirmar = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            driver.execute_script("arguments[0].click();", confirmar)
+            confirmou = True
+            break
+        except:
+            continue
+
+    if not confirmou:
+        driver.save_screenshot("/tmp/erro_confirmar.png")
+        raise Exception("Não foi possível confirmar a competência.")
 
     time.sleep(6)
-
 
 def _scrape_lancamentos_cards(driver, mes, ano):
     """
