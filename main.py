@@ -4,11 +4,11 @@ DIAMOND TOWER — Automação Orçamentária via XLSX
 Fluxo:
 1. Procura um arquivo .xlsx em /entradas
 2. Lê o extrato exportado da Guarida
-3. Pega apenas os débitos
+3. Pega apenas os débitos válidos
 4. Classifica os lançamentos
 5. Atualiza a planilha PF.xlsx
 6. Salva notas/comentários nas células
-7. Move o extrato para /processados
+7. Move o extrato para /processados somente se PF.xlsx foi alterado
 """
 
 import os
@@ -19,9 +19,14 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
+
+try:
+    import anthropic
+except Exception:
+    anthropic = None
+
 
 # ── Configuração ──────────────────────────────────────────────
 
@@ -31,6 +36,7 @@ PROCESSADOS_DIR = BASE_DIR / "processados"
 PF_PATH = BASE_DIR / "PF.xlsx"
 
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
+
 
 # ── Mapeamento mês → coluna na planilha ───────────────────────
 
@@ -50,84 +56,125 @@ MONTH_TO_COL = {
     (3, 2026): "R",
 }
 
+
 # ── Mapeamento linhas da planilha ─────────────────────────────
 
 ROW_MAP = {
     4: {"empresa": "ALTO PADRAO", "desc": "Alto Padrão — Mão de Obra",
-        "keywords": ["alto padrao", "onx", "portaria", "recepcao", "monitoramento", "ronda", "porteiro", "limpeza"]},
+        "keywords": ["alto padrao", "onx", "portaria", "recepcao", "monitoramento", "ronda", "porteiro", "limpeza", "servicos limpeza"]},
+
     11: {"empresa": "CAPPELLETTO", "desc": "Cappelletto — Gestores presenciais",
-         "keywords": ["cappelletto", "gestao", "servico auxiliar de administracao condominial"]},
+         "keywords": ["cappelletto", "gestao", "servico auxiliar de administracao condominial", "auxiliar de administracao condominial"]},
+
     12: {"empresa": "GUARIDA", "desc": "Guarida — Auxiliar Administração",
-         "keywords": ["guarida", "taxa de administracao", "taxa adm"]},
+         "keywords": ["guarida", "taxa de administracao", "taxa adm", "taxa de adm.guarida"]},
+
     13: {"empresa": "ORGANICO", "desc": "Orgânico — Oficial Manutenção 44h",
-         "keywords": ["marco aurelio", "oficial manutencao", "salario marco aurelio"]},
+         "keywords": ["marco aurelio", "oficial manutencao", "salario marco aurelio", "fgts mensal", "vale transporte", "seguro de vida func"]},
+
     14: {"empresa": "ORGANICO", "desc": "Orgânico — Remuneração Subsíndico",
          "keywords": ["subsidico", "sub sindico", "pro-labore subsidico", "remuneracao subsidico"]},
+
     17: {"empresa": "FG PISCINAS", "desc": "FG Piscinas — Limpeza/Química",
-         "keywords": ["fg piscinas", "piscina", "espelho d'agua", "espelho dagua"]},
+         "keywords": ["fg piscinas", "piscina", "espelho d'agua", "espelho dagua", "manut.piscina"]},
+
     18: {"empresa": "ELITE", "desc": "Elite — Elevadores Atlas",
-         "keywords": ["manut.elevador", "manut elevador", "atlas", "schindler", "elevadores atlas schindler"]},
+         "keywords": ["manut.elevador", "manut elevador", "atlas", "schindler", "elevadores atlas schindler", "contrato mensal manut"]},
+
     19: {"empresa": "STEMAC", "desc": "Stemac — Gerador",
-         "keywords": ["stemac", "gerador", "manut. gerador"]},
+         "keywords": ["stemac", "gerador", "manut. gerador", "grupo geradores"]},
+
     20: {"empresa": "BELLINI", "desc": "Bellini — Consultoria Jurídica",
-         "keywords": ["bellini", "honorarios advocaticios", "juridica", "advocaticio"]},
+         "keywords": ["bellini", "consultoria juridica", "juridica"]},
+
     21: {"empresa": "AUDITORIA", "desc": "Auditoria Externa",
-         "keywords": ["auditoria", "taborda", "pastas contabeis"]},
+         "keywords": ["auditoria", "taborda", "pastas contabeis", "auditoria pastas"]},
+
     24: {"empresa": "MULTIPLAN", "desc": "Multiplan — Lixo/Entulho",
          "keywords": ["multiplan", "lixo", "entulho"]},
+
     25: {"empresa": "ALPINISMO", "desc": "Alpinismo — Fachada",
-         "keywords": ["fachada", "uperclean", "rest.fachada"]},
+         "keywords": ["fachada", "uperclean", "rest.fachada", "servicos verticais"]},
+
     26: {"empresa": "DEMANDA", "desc": "Manutenção Bombas Recalque",
-         "keywords": ["bomba", "recalque", "manut.bomba dagua"]},
+         "keywords": ["bomba", "recalque", "manut.bomba dagua", "bombas do espelho"]},
+
     27: {"empresa": "", "desc": "Manutenção Interfones",
          "keywords": ["interfone", "porteiro eletronico", "mactel"]},
+
     28: {"empresa": "", "desc": "Manutenção Predial",
-         "keywords": ["hidrojateamento", "esgoto", "portao", "hidraulico", "desobstrucao", "manut.portao", "manutencao predial"]},
+         "keywords": ["hidrojateamento", "esgoto", "portao", "hidraulico", "desobstrucao", "manut.portao", "manutencao predial", "manut.hidraulico"]},
+
     29: {"empresa": "", "desc": "Incêndio",
          "keywords": ["incendio", "hidrante", "extintor"]},
+
     30: {"empresa": "", "desc": "Obrigações Legais",
-         "keywords": ["laudo", "spda", "ppra", "pcmso", "qualidade do ar", "obrigacao legal", "ativa medicina", "toxilab"]},
+         "keywords": ["laudo", "spda", "ppra", "pcmso", "qualidade do ar", "obrigacao legal", "ativa medicina", "toxilab", "laudo tecnico", "laudo ppra", "laudo pcmso"]},
+
     31: {"empresa": "", "desc": "Controle Pragas / Caixa D'água",
-         "keywords": ["caixa dagua", "caixa d agua", "limpeza do reservatorio", "eco-ambiental", "dedetiz"]},
+         "keywords": ["caixa dagua", "caixa d agua", "limpeza do reservatorio", "eco-ambiental", "dedetiz", "limpeza caixa dagua"]},
+
     32: {"empresa": "", "desc": "Paisagismo",
          "keywords": ["paisagismo"]},
+
     35: {"empresa": "", "desc": "Chaveiro",
          "keywords": ["chaveiro"]},
+
     36: {"empresa": "", "desc": "Lâmpadas",
          "keywords": ["lampada", "lampadas"]},
+
     37: {"empresa": "", "desc": "Obras Diversas",
-         "keywords": ["obra", "mureta", "totens", "benfeitorias"]},
+         "keywords": ["obra", "mureta", "totens", "benfeitorias", "reforma dos totens"]},
+
     38: {"empresa": "", "desc": "Material Ferragem/Elétrica/Hidráulica",
-         "keywords": ["procal", "material", "mat. eletrico", "ferragens", "tintas", "material constr", "material pintura"]},
+         "keywords": ["procal", "material", "mat. eletrico", "ferragens", "tintas", "material constr", "material pintura", "material para manutencao"]},
+
     39: {"empresa": "", "desc": "Material Expediente",
-         "keywords": ["expediente", "escritorio", "impressora", "fortpel"]},
+         "keywords": ["expediente", "escritorio", "impressora", "fortpel", "mat.escritorio"]},
+
     40: {"empresa": "", "desc": "Material Limpeza",
          "keywords": ["material limpeza", "mat.limpeza", "descartaveis"]},
+
     41: {"empresa": "ELITE", "desc": "Elite — Peças Elevador",
-         "keywords": ["elevador pecas", "peca elevador", "pecas elevador", "conserto elevador"]},
+         "keywords": ["elevador pecas", "peca elevador", "pecas elevador", "conserto elevador", "negociacao - acordo manutencoes"]},
+
     42: {"empresa": "", "desc": "Móveis e Utensílios",
          "keywords": ["movel", "utensilio", "copa funcionarios"]},
+
     45: {"empresa": "", "desc": "Peças Gerador / Óleo Diesel",
-         "keywords": ["bateria gerador", "diesel", "oleo diesel"]},
+         "keywords": ["bateria gerador", "diesel", "oleo diesel", "baterias do gerador"]},
+
     49: {"empresa": "", "desc": "Telefonia/Internet",
-         "keywords": ["vivo", "telefonica", "telefonia", "internet", "celular"]},
+         "keywords": ["vivo", "telefonica", "telefonia", "internet", "celular", "desp.celular"]},
+
+    50: {"empresa": "", "desc": "Correio/Motoboy",
+         "keywords": ["motoboy", "sedex", "correio"]},
+
     51: {"empresa": "", "desc": "Impostos DIRF/DARF/ISS/PIS/COFINS",
-         "keywords": ["issqn", "inss", "fgts", "secovimed", "efd-reinf", "retencao issqn", "declaracao mensal"]},
+         "keywords": ["issqn", "inss", "fgts", "secovimed", "efd-reinf", "retencao issqn", "declaracao mensal", "ministerio da previdencia", "irrf"]},
+
     52: {"empresa": "", "desc": "Assembleia",
-         "keywords": ["assembleia", "reuniao de conselho", "almocos"]},
+         "keywords": ["assembleia", "reuniao de conselho"]},
+
     59: {"empresa": "", "desc": "Água e Esgoto",
          "keywords": ["dmae", "consumo dagua", "agua", "esgoto"]},
+
     60: {"empresa": "", "desc": "Energia Elétrica",
          "keywords": ["ceee", "consumo luz", "energia eletrica"]},
+
     61: {"empresa": "", "desc": "Seguro",
          "keywords": ["seguro", "tokio marine"]},
+
     65: {"empresa": "", "desc": "Despesas Reembolsáveis",
-         "keywords": ["reembolso", "ressarcimento", "uber", "reemb.mat"]},
+         "keywords": ["reembolso", "ressarcimento", "uber", "reemb.mat", "desp.refeicao", "alimentacao", "refeisul"]},
+
     66: {"empresa": "", "desc": "Honorários Advocatícios",
          "keywords": ["honorario advocaticio", "honorarios advocaticios"]},
+
     68: {"empresa": "", "desc": "Transferências Entre Contas",
-         "keywords": ["envio /transf", "transferencia entre contas", "aplicacao"]},
+         "keywords": ["envio /transf", "transferencia entre contas", "aplicacao", "transf. eletronica"]},
 }
+
 
 # ── Helpers ───────────────────────────────────────────────────
 
@@ -198,7 +245,7 @@ def ler_extrato_xlsx(caminho: Path):
     header_row = None
     col_data = col_hist = col_debito = col_credito = None
 
-    for row in range(1, min(ws.max_row, 30) + 1):
+    for row in range(1, min(ws.max_row, 40) + 1):
         valores = []
         for col in range(1, min(ws.max_column, 20) + 1):
             val = ws.cell(row, col).value
@@ -267,11 +314,21 @@ def ler_extrato_xlsx(caminho: Path):
             continue
         if "lancamentos futuros" in hist_norm:
             continue
-        if hist_norm.startswith("saldo final conta"):
+        if hist_norm in ["6121 diamond tower", "leticia roberta prestes"]:
             continue
-        if hist_norm == "saldo geral":
+        if "fundo sl " in hist_norm:
             continue
-        if hist_norm == "ressarcimento notas notas":
+        if hist_norm.startswith("condominio sl "):
+            continue
+        if hist_norm.startswith("multa sl "):
+            continue
+        if hist_norm.startswith("juros e corr monetaria"):
+            continue
+        if hist_norm.startswith("rec."):
+            continue
+        if hist_norm.startswith("doc extra"):
+            continue
+        if hist_norm.startswith("ressarcimento notas"):
             continue
 
         if hasattr(data_val, "strftime"):
@@ -330,35 +387,34 @@ def classificar_keywords(descricao: str):
 
 
 def classificar_com_claude(lancamentos):
-    print(f"\n[2/5] Classificando {len(lancamentos)} lançamentos com Claude AI...")
+    print(f"[2/5] Classificando {len(lancamentos)} lançamentos...")
 
-    if not ANTHROPIC_KEY:
-        print("   ANTHROPIC_KEY não configurada, usando fallback por keywords.")
+    if not ANTHROPIC_KEY or anthropic is None:
+        print("   Claude indisponível. Usando fallback por keywords.")
         return {
-            i: {"linha": classificar_keywords(l["descricao"])[0], "motivo": "Fallback Keywords sem Claude"}
+            i: {"linha": classificar_keywords(l["descricao"])[0], "motivo": "fallback keywords"}
             for i, l in enumerate(lancamentos)
         }
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
     categorias = "\n".join([
-        f"Linha {num}: {info['empresa'] + ' — ' if info['empresa'] else ''}{info['desc']} (Keywords: {', '.join(info['keywords'])})"
+        f"Linha {num}: {info['desc']} | keywords: {', '.join(info['keywords'])}"
         for num, info in ROW_MAP.items()
     ])
 
     lista_formatada = "\n".join([
-        f"{i+1}. Data: {l['data']} | Valor: R$ {l['valor']:.2f} | Descrição: '{l['descricao']}'"
+        f"{i+1}. {l['data']} | {l['descricao']} | R$ {formatar_brl(l['valor'])}"
         for i, l in enumerate(lancamentos)
     ])
 
-    prompt = f"""Você é o analista financeiro do condomínio Diamond Tower. Classifique cada débito do extrato nas linhas do orçamento.
+    prompt = f"""Você é o analista financeiro do condomínio Diamond Tower.
+Classifique cada débito do extrato nas linhas do orçamento.
 
 CATEGORIAS:
 {categorias}
 
 Linha 999 = não classificado / dúvida
 
-REGRAS IMPORTANTES:
+REGRAS:
 1. Marco Aurelio = linha 13
 2. Subsindico / Pro-labore subsindico = linha 14
 3. ONX / portaria / recepção / limpeza terceirizada = linha 4
@@ -376,12 +432,13 @@ LANÇAMENTOS:
 Responda SOMENTE em JSON válido:
 {{
   "classificacoes": [
-    {{"n": 1, "linha": 13, "motivo": "..."}}
+    {{"n": 1, "linha": 13, "motivo": "..." }}
   ]
 }}
 """
 
     try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         resp = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=2500,
@@ -400,12 +457,12 @@ Responda SOMENTE em JSON válido:
         for i, l in enumerate(lancamentos):
             if i not in classif:
                 linha, _ = classificar_keywords(l["descricao"])
-                classif[i] = {"linha": linha, "motivo": "fallback keywords"}
+                classif[i] = {"linha": linha, "motivo": "fallback complementar"}
 
         return classif
 
     except Exception as e:
-        print(f"   Claude falhou, usando fallback por keywords. Erro: {e}")
+        print(f"   Claude falhou. Usando fallback por keywords. Erro: {e}")
         return {
             i: {"linha": classificar_keywords(l["descricao"])[0], "motivo": "fallback geral"}
             for i, l in enumerate(lancamentos)
@@ -428,8 +485,8 @@ def atualizar_pf(lancamentos, classificacoes):
         raise Exception(f"Arquivo não encontrado: {PF_PATH}")
 
     wb = load_workbook(PF_PATH)
-    anos_planilha = set()
 
+    anos_planilha = set()
     for l in lancamentos:
         ano_aba = l["ano"] if l["mes"] >= 3 else l["ano"] - 1
         anos_planilha.add(ano_aba)
@@ -477,7 +534,17 @@ def atualizar_pf(lancamentos, classificacoes):
             f"{lanc['data']} - {lanc['descricao']} | R$ {formatar_brl(lanc['valor'])}"
         )
 
+    print(f"   Células com lançamentos: {len(por_celula)}")
+    print(f"   Não classificados: {len(nao_classificados)}")
+
+    for cel_ref, dados in sorted(por_celula.items()):
+        print(f"   -> {cel_ref}: {len(dados['itens'])} item(ns) | soma R$ {formatar_brl(dados['total'])} | {dados['desc']}")
+
+    if not por_celula:
+        raise Exception("Nenhuma célula de destino foi montada. Nada será gravado no PF.xlsx.")
+
     resumo = []
+    alterou_planilha = False
 
     for cel_ref, dados in por_celula.items():
         cell = ws[cel_ref]
@@ -488,17 +555,22 @@ def atualizar_pf(lancamentos, classificacoes):
         elif isinstance(valor_atual, (int, float)):
             valor_atual_num = float(valor_atual)
         else:
-            try:
-                valor_atual_num = limpar_valor_excel(valor_atual)
-            except Exception:
-                valor_atual_num = 0.0
+            valor_atual_num = limpar_valor_excel(valor_atual)
 
         novo_valor = round(valor_atual_num + dados["total"], 2)
+
+        if novo_valor != valor_atual_num:
+            alterou_planilha = True
+
         cell.value = novo_valor
         cell.number_format = '#,##0.00'
 
         nota_atual = cell.comment.text if cell.comment else ""
         nota_final = adicionar_nota_existente(nota_atual, dados["itens"])
+
+        if nota_final != nota_atual:
+            alterou_planilha = True
+
         cell.comment = Comment(nota_final, "Automação")
 
         resumo.append({
@@ -508,7 +580,11 @@ def atualizar_pf(lancamentos, classificacoes):
             "itens": dados["itens"],
         })
 
+    if not alterou_planilha:
+        raise Exception("PF.xlsx não sofreu nenhuma alteração real. Processo interrompido.")
+
     wb.save(PF_PATH)
+    print("   PF.xlsx salvo com sucesso.")
 
     return resumo, nao_classificados
 
@@ -553,7 +629,7 @@ def main():
 
     print("[5/5] Concluído.\n")
 
-    for r in resumo:
+    for r in sorted(resumo, key=lambda x: x["celula"]):
         print(f"{r['celula']:>6} | {r['desc'][:45]:45s} | R$ {formatar_brl(r['valor'])}")
 
     if nao_classificados:
